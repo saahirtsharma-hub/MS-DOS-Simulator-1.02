@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  =============================================================================
+  MS-DOS 6.22 PROFESSIONAL WEB SIMULATOR
+  Lines of Code: 300+
+  Features: Hierarchical VFS, Persistent Storage, CRT UI, EDIT.COM
+  =============================================================================
+-->
+<head>
+    <meta charset="UTF-8">
+    <title>MS-DOS Professional v6.22</title>
+    <style>
+        :root {
+            --dos-green: #00ff41;
+            --dos-bg: #000000;
+            --editor-blue: #0000AA;
+            --gray: #AAAAAA;
+        }
+
+        body, html {
+            background-color: var(--dos-bg);
+            color: var(--dos-green);
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0; padding: 0;
+            height: 100vh; width: 100vw;
+            overflow: hidden;
+            display: flex; flex-direction: column;
+        }
+
+        /* CRT Scanline Effect */
+        body::before {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 1000;
+            background-size: 100% 3px, 3px 100%;
+            pointer-events: none;
+        }
+
+        #monitor {
+            flex: 1;
+            padding: 25px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            z-index: 1;
+        }
+
+        #history {
+            white-space: pre-wrap;
+            line-height: 1.4;
+        }
+
+        .input-area {
+            display: flex;
+            align-items: center;
+            margin-top: 10px;
+        }
+
+        #prompt { margin-right: 12px; font-weight: bold; }
+
+        input {
+            background: transparent;
+            border: none;
+            color: var(--dos-green);
+            font-family: inherit;
+            font-size: 1.1rem;
+            outline: none;
+            flex: 1;
+        }
+
+        /* EDIT.COM UI */
+        #editor-mode {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: var(--editor-blue);
+            color: white;
+            z-index: 2000;
+        }
+
+        #editor-bar {
+            background: var(--gray);
+            color: black;
+            padding: 2px 15px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        #editor-textarea {
+            width: 100%;
+            height: calc(100% - 44px);
+            background: transparent;
+            border: none;
+            color: white;
+            font-family: inherit;
+            font-size: 1.2rem;
+            padding: 15px;
+            resize: none;
+            outline: none;
+        }
+
+        #editor-footer {
+            background: var(--gray);
+            color: black;
+            padding: 2px 15px;
+            font-size: 0.9rem;
+        }
+
+        ::-webkit-scrollbar { width: 12px; }
+        ::-webkit-scrollbar-thumb { background: #222; border: 1px solid #444; }
+    </style>
+</head>
+<body>
+
+<div id="monitor">
+    <div id="history">Microsoft(R) MS-DOS(R) Version 6.22
+(C)Copyright Microsoft Corp 1981-1994.
+
+Type "HELP" for a command overview.
+Virtual Drive C: Ready.</div>
+    <div class="input-area">
+        <span id="prompt">C:\></span>
+        <input type="text" id="cmd-input" autofocus autocomplete="off" spellcheck="false">
+    </div>
+</div>
+
+<div id="editor-mode">
+    <div id="editor-bar">
+        <span id="edit-filename">EDIT - UNTITLED.TXT</span>
+        <span>File  Edit  Search  Options</span>
+    </div>
+    <textarea id="editor-textarea"></textarea>
+    <div id="editor-footer">F1=Help | Ctrl+S=Save | Ctrl+Q=Exit</div>
+</div>
+
+<script>
+    /**
+     * MS-DOS SHELL LOGIC
+     * Handles VFS, Persistence, and Commands.
+     */
+    const history = document.getElementById('history');
+    const input = document.getElementById('cmd-input');
+    const monitor = document.getElementById('monitor');
+    const promptSpan = document.getElementById('prompt');
+    const editor = document.getElementById('editor-mode');
+    const textArea = document.getElementById('editor-textarea');
+    const editName = document.getElementById('edit-filename');
+
+    // --- VIRTUAL FILE SYSTEM STATE ---
+    let currentPath = ["ROOT"]; // Root of the C: drive
+    let vfs = JSON.parse(localStorage.getItem('msdos_vfs')) || {
+        "ROOT": {
+            "type": "dir",
+            "children": {
+                "AUTOEXEC.BAT": { "type": "file", "content": "@ECHO OFF\nPROMPT $P$G" },
+                "CONFIG.SYS": { "type": "file", "content": "FILES=40\nBUFFERS=20" },
+                "DOS": { "type": "dir", "children": {} }
+            }
+        }
+    };
+
+    const saveVFS = () => localStorage.setItem('msdos_vfs', JSON.stringify(vfs));
+
+    const getDir = (pathArr) => {
+        let curr = vfs;
+        for (const p of pathArr) {
+            curr = curr[p] ? curr[p] : curr.children[p];
+        }
+        return curr;
+    };
+
+    const getPathString = () => {
+        if (currentPath.length === 1) return "C:\\";
+        return "C:\\" + currentPath.slice(1).join("\\");
+    };
+
+    const log = (msg) => {
+        const div = document.createElement('div');
+        div.textContent = msg;
+        history.appendChild(div);
+        monitor.scrollTop = monitor.scrollHeight;
+    };
+
+    // --- COMMAND EXECUTION ---
+    function runCommand(raw) {
+        const parts = raw.trim().split(/\s+/);
+        const cmd = parts[0].toLowerCase();
+        const arg = parts.slice(1).join(' ').toUpperCase();
+        
+        log(`\n${getPathString()}>${raw}`);
+
+        const currentDir = getDir(currentPath);
+
+        switch (cmd) {
+            case 'help':
+                log("DIR          - List files and directories");
+                log("CD [DIR]     - Change directory (.. for back)");
+                log("MD [NAME]    - Make a new directory");
+                log("RD [NAME]    - Remove a directory");
+                log("EDIT [FILE]  - Open text editor");
+                log("TYPE [FILE]  - View file contents");
+                log("DEL [FILE]   - Delete a file");
+                log("VER          - Show version");
+                log("CLS          - Clear screen");
+                log("RESET        - Factory reset system");
+                break;
+
+            case 'cls':
+                history.innerHTML = '';
+                break;
+
+            case 'ver':
+                log("MS-DOS Professional Version 6.22.8");
+                break;
+
+            case 'dir':
+                log(` Volume in drive C is DOS_VIRTUAL`);
+                log(` Directory of ${getPathString()}\n`);
+                let files = 0, dirs = 0;
+                for (let key in currentDir.children) {
+                    const item = currentDir.children[key];
+                    if (item.type === 'dir') {
+                        log(`${key.padEnd(12)} <DIR>      03-18-2026`);
+                        dirs++;
+                    } else {
+                        log(`${key.padEnd(12)}            03-18-2026`);
+                        files++;
+                    }
+                }
+                log(`\n     ${files} File(s), ${dirs} Dir(s)`);
+                break;
+
+            case 'cd':
+                if (!arg || arg === "\\") {
+                    currentPath = ["ROOT"];
+                } else if (arg === "..") {
+                    if (currentPath.length > 1) currentPath.pop();
+                } else {
+                    if (currentDir.children[arg] && currentDir.children[arg].type === 'dir') {
+                        currentPath.push(arg);
+                    } else {
+                        log("Invalid directory.");
+                    }
+                }
+                promptSpan.textContent = getPathString() + ">";
+                break;
+
+            case 'md':
+            case 'mkdir':
+                if (arg) {
+                    currentDir.children[arg] = { type: 'dir', children: {} };
+                    saveVFS();
+                    log(`Directory ${arg} created.`);
+                } else log("Specify name.");
+                break;
+
+            case 'rd':
+                if (arg && currentDir.children[arg] && currentDir.children[arg].type === 'dir') {
+                    delete currentDir.children[arg];
+                    saveVFS();
+                    log(`Removed ${arg}.`);
+                } else log("Directory not found.");
+                break;
+
+            case 'edit':
+                if (arg) openEditor(arg);
+                else log("Filename required.");
+                break;
+
+            case 'type':
+                if (arg && currentDir.children[arg] && currentDir.children[arg].type === 'file') {
+                    log(currentDir.children[arg].content);
+                } else log("File not found.");
+                break;
+
+            case 'del':
+                if (arg && currentDir.children[arg] && currentDir.children[arg].type === 'file') {
+                    delete currentDir.children[arg];
+                    saveVFS();
+                    log(`Deleted ${arg}.`);
+                } else log("File not found.");
+                break;
+
+            case 'reset':
+                if (confirm("Format C: drive? All data will be lost.")) {
+                    localStorage.removeItem('msdos_vfs');
+                    location.reload();
+                }
+                break;
+
+            case '': break;
+            default:
+                log("Bad command or file name.");
+        }
+    }
+
+    // --- EDITOR LOGIC ---
+    let activeFile = "";
+    function openEditor(fn) {
+        activeFile = fn;
+        const currentDir = getDir(currentPath);
+        const file = currentDir.children[activeFile];
+        textArea.value = (file && file.type === 'file') ? file.content : "";
+        editName.textContent = `EDIT - ${activeFile}`;
+        editor.style.display = 'block';
+        textArea.focus();
+    }
+
+    textArea.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.key === 's') { // Save
+            e.preventDefault();
+            const currentDir = getDir(currentPath);
+            currentDir.children[activeFile] = { type: 'file', content: textArea.value };
+            saveVFS();
+            alert("File saved.");
+        }
+        if (e.ctrlKey && e.key === 'q') { // Quit
+            e.preventDefault();
+            editor.style.display = 'none';
+            input.focus();
+        }
+    });
+
+    // --- BOILERPLATE LISTENERS ---
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            runCommand(input.value);
+            input.value = '';
+        }
+    });
+
+    window.onclick = () => {
+        if (editor.style.display !== 'block') input.focus();
+    };
+
+    // Initialization check
+    promptSpan.textContent = getPathString() + ">";
+</script>
+</body>
+</html>
